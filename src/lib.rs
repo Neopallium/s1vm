@@ -1,16 +1,17 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
-pub use error::Error;
+pub use error::{Error, Result};
 
 // VM
-mod stack;
 mod memory;
 mod export;
+mod stack;
+pub use stack::*;
 mod value;
 pub use value::*;
-mod op;
-pub use op::*;
+mod isa;
+pub use isa::*;
 mod vm;
 pub use vm::*;
 

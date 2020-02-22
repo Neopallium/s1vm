@@ -3,18 +3,39 @@
 use s1vm::*;
 
 fn main() -> Result<(), Error> {
-  // Compile module
-  let func = Function::new("add");
-  let mut module = Module::new("test");
-  module.add_function("add", func)?;
+  let mut args = std::env::args();
+  args.next(); // skip program name.
+  let file = args.next().expect("missing file name");
+  let func = args.next().expect("missing function name");
+  let params: Vec<Value> = args.map(|x| {
+    match x.parse::<i64>() {
+      Ok(v) => Value::I64(v),
+      Err(e) => {
+        eprintln!("failed to parse '{}': {}", x, e);
+        Value::I64(0)
+      },
+    }
+  }).collect();
 
-  // Create VM and load module into it.
+  println!("Type sizes:");
+  println!("isa::Instruction = {}", std::mem::size_of::<Instruction>());
+  println!("bwasm::Instruction = {}", std::mem::size_of::<bwasm::Instruction>());
+
+  // Create VM.
   let mut vm = VM::new();
-  let _mod_addr = vm.load_module(&module)?;
+
+  // Load wasm file
+  println!("--- Loading module: {}", file);
+  vm.load_file("main", &file)?;
 
   // Call module function
-  let ret = vm.call("test", "add", &vec![Value::I64(1),Value::I64(2)])?;
-  println!("add(1, 2) = {}", ret);
+  println!("Calling:  {}({:?})", func, params);
+  let ret = vm.call("main", &func, &params)?;
+  if let Some(ret) = ret {
+    println!("ret = {}", ret);
+  } else {
+    println!("ret = <no return value>");
+  }
 
   Ok(())
 }

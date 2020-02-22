@@ -5,3 +5,13 @@ authors = ["Robert G. Jakabosky <rjakabosky+neopallium@neoawareness.com>"]
 edition = "2018"
 
 [dependencies]
+bwasm = "0.1.1"
+wasmi-validation = "0.3.0"
+parity-wasm = "0.41.0"
+
+# uncomment these to do profiling.
+#[profile.dev]
+#opt-level = 1
+#
+#[profile.release]
+#debug = true

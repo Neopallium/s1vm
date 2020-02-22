@@ -1,18 +1,19 @@
 use std::fmt;
 
-pub enum ValType {
+#[derive(Debug, Clone, Copy)]
+pub enum ValueType {
   I32,
   I64,
   F32,
   F64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
   I32(i32),
   I64(i64),
-  F32(i32),
-  F64(i64),
+  F32(f32),
+  F64(f64),
 }
 
 impl fmt::Display for Value {
@@ -25,6 +26,36 @@ impl fmt::Display for Value {
     }
   }
 }
+
+impl From<bwasm::ValueType> for ValueType {
+  fn from(val_type: bwasm::ValueType) -> Self {
+    match val_type {
+      bwasm::ValueType::I32 => ValueType::I32,
+      bwasm::ValueType::I64 => ValueType::I64,
+      bwasm::ValueType::F32 => ValueType::F32,
+      bwasm::ValueType::F64 => ValueType::F64,
+    }
+  }
+}
+
+impl From<&bwasm::ValueType> for ValueType {
+  fn from(val_type: &bwasm::ValueType) -> Self {
+    ValueType::from(*val_type)
+  }
+}
+
+impl ValueType {
+  pub fn from_slice(val_types: &[bwasm::ValueType]) -> Vec<ValueType> {
+    val_types.iter().map(ValueType::from).collect()
+  }
+}
+
+pub type RetValue = Option<Value>;
+
+pub type ConstI32 = i32;
+pub type ConstI64 = i64;
+pub type ConstF32 = f32;
+pub type ConstF64 = f64;
 
 pub type TypeIdx = u32;
 pub type FuncIdx = u32;
@@ -40,23 +71,34 @@ pub type TableAddr = u32;
 pub type MemAddr = u32;
 pub type GlobalAddr = u32;
 
-pub struct FuncType {
-  pub params: Vec<ValType>,
-  pub ret_type: ValType,
+#[derive(Debug, Clone, Default)]
+pub struct FunctionType {
+  pub params: Vec<ValueType>,
+  pub ret_type: Option<ValueType>,
 }
 
-impl FuncType {
-  pub fn new(params: Vec<ValType>, ret_type: ValType) -> FuncType {
-    FuncType {
-      params,
-      ret_type,
-    }
+impl FunctionType {
+  pub fn new() -> FunctionType {
+    Default::default()
+  }
+
+  pub fn param_count(&self) -> usize {
+    self.params.len()
   }
 }
 
-impl Default for FuncType {
-  fn default() -> Self {
-    Self::new(vec!(), ValType::I64)
+impl From<bwasm::FunctionType> for FunctionType {
+  fn from(func_type: bwasm::FunctionType) -> Self {
+    FunctionType::from(&func_type)
+  }
+}
+
+impl From<&bwasm::FunctionType> for FunctionType {
+  fn from(func_type: &bwasm::FunctionType) -> Self {
+    FunctionType {
+      params: ValueType::from_slice(func_type.params()),
+      ret_type: func_type.return_type().map(ValueType::from),
+    }
   }
 }
 

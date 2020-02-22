@@ -1,67 +1,40 @@
 use std::collections::HashMap;
 
 use crate::*;
-use crate::error::*;
 
-pub struct ModuleInstance<'a> {
-  module: &'a Module,
-}
-
-impl<'a> ModuleInstance<'a> {
-  pub fn new(module: &'a Module) -> ModuleInstance {
-    ModuleInstance {
-      module,
-    }
-  }
-
-  pub fn name(&self) -> &str {
-    self.module.name()
-  }
-
-  pub fn call(&mut self, name: &str, params: &[Value]) -> Result<Value> {
-    let func = self.module.get_function(name)?;
-    func.call(self, params)
-  }
-}
-
-#[derive(Default)]
-pub struct Module {
-  name: String,
+#[derive(Debug, Default)]
+pub struct ModuleInstance {
   //types: Vec<FuncType>,
-  funcs: Vec<Function>,
+  funcs: Vec<FuncAddr>,
   //globals: Vec<Value>,
   exports: HashMap<String, FuncIdx>,
 }
 
-impl Module {
-  pub fn new(name: &str) -> Module {
-    Module{
-      name: name.to_string(),
-      ..Default::default()
-    }
+impl ModuleInstance {
+  pub fn new() -> ModuleInstance {
+    Default::default()
   }
 
-  pub fn name(&self) -> &str {
-    self.name.as_str()
+  // Map function idx to address
+  pub fn add_function(&mut self, addr: FuncAddr) {
+    self.funcs.push(addr);
   }
 
-  // Add and export a function
-  pub fn add_function(&mut self, name: &str, function: Function) -> Result<FuncIdx> {
+  // Export a function
+  pub fn add_export(&mut self, name: &str, idx: FuncIdx) -> Result<()> {
     let name = name.to_string();
     if self.exports.contains_key(&name) {
       Err(Error::FuncExists)
     } else {
-      let idx = self.funcs.len() as FuncIdx;
-      self.funcs.push(function);
       self.exports.insert(name, idx);
-      Ok(idx)
+      Ok(())
     }
   }
 
-  pub fn get_function(&self, name: &str) -> Result<&Function> {
+  pub fn find_function(&self, name: &str) -> Result<FuncAddr> {
     if let Some(idx) = self.exports.get(&name.to_string()) {
       if let Some(func) = self.funcs.get(*idx as usize) {
-        return Ok(func);
+        return Ok(*func);
       }
     }
     Err(Error::FuncNotFound)
