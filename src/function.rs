@@ -35,7 +35,7 @@ impl Function {
     for (pc, op) in code.iter().enumerate() {
       eprintln!("- {}: {:?}", pc, op);
     }
-    */
+    // */
     Ok(Function {
       name: func.name().to_string(),
       func_type: FunctionType::from(func.func_type()),
@@ -50,17 +50,21 @@ impl Function {
     self.func_type.param_count()
   }
 
-  pub fn call(&self, state: &State, store: &mut Store) -> Trap<RetValue> {
+  pub fn ret_type(&self) -> Option<ValueType> {
+    self.func_type.ret_type
+  }
+
+  pub fn call(&self, state: &State, store: &mut Store) -> Trap<()> {
     match self.body {
       FunctionBody::Internal(ref body) => {
         // Setup stack frame for function.
-        let old_bp = store.stack.push_frame(self.param_count())?;
+        let old_frame = store.stack.push_frame(self.param_count(), body.local_types.len())?;
 
         // run function
-        let ret = run_function(self, body, state, store)?;
+        let ret = run_function(body, state, store)?;
 
         // cleanup stack frame.
-        store.stack.pop_frame(old_bp);
+        store.stack.pop_frame(old_frame, self.ret_type());
         Ok(ret)
       },
       FunctionBody::Host(_) => {
@@ -70,18 +74,14 @@ impl Function {
   }
 }
 
-fn run_function(func: &Function, body: &InternalFunction, state: &State, store: &mut Store) -> Trap<RetValue> {
-  // Clear stack space for locals.
-  store.stack.reserve_locals(body.local_types.len())?;
-
+fn run_function(body: &InternalFunction, state: &State, store: &mut Store) -> Trap<()> {
   //eprintln!("run_function: {}", func.name);
   //eprintln!("-- Stack: {:?}", store.stack);
   let mut pc = 0usize;
   let code = &body.code;
 
   if code.len() == 0 {
-    // No code!
-    return Ok(None);
+    todo!("Need to trap");
   }
   let pc_end = code.len() - 1;
 
@@ -117,23 +117,11 @@ fn run_function(func: &Function, body: &InternalFunction, state: &State, store: 
         return Err(TrapKind::Unreachable);
       },
       Return => {
-        //eprintln!("-- Stack: {:?}", store.stack);
-        match func.func_type.ret_type {
-          Some(ret_type) => {
-            return Ok(Some(store.stack.pop_typed(ret_type)?));
-          },
-          None => break,
-        }
+        return Ok(());
       },
 
       Call(func_idx) => {
-        let ret = state.invoke_function(store, func_idx)?;
-        if let Some(ret) = ret {
-          //eprintln!("------------------- return: {:?}", ret);
-          store.stack.push_val(ret.into())?;
-        } else {
-          //eprintln!("------------------- return: <no return value>");
-        }
+        state.invoke_function(store, func_idx)?;
       },
       CallIndirect(_type_idx) => {
         todo!("call");
@@ -147,16 +135,13 @@ fn run_function(func: &Function, body: &InternalFunction, state: &State, store: 
       },
 
       GetLocal(local_idx) => {
-        let val = store.stack.get_local_val(local_idx)?;
-        store.stack.push_val(val)?;
+        store.stack.get_local(local_idx)?;
       },
       SetLocal(local_idx) => {
-        let val = store.stack.pop_val()?;
-        store.stack.set_local_val(local_idx, val)?;
+        store.stack.set_local(local_idx)?;
       },
       TeeLocal(local_idx) => {
-        let val = store.stack.top_val()?;
-        store.stack.set_local_val(local_idx, val)?;
+        store.stack.tee_local(local_idx)?;
       },
 
       GetGlobal(_global_idx) => {
@@ -358,72 +343,85 @@ fn run_function(func: &Function, body: &InternalFunction, state: &State, store: 
     }
     pc = pc + 1;
   }
-  Ok(None)
+  Ok(())
 }
 
 macro_rules! impl_int_binops {
-  ($store: expr, $type: ty, $op: ident) => {
-    {
-      let (left, right) = $store.stack.pop_pair()? as ($type, $type);
-      let res = left.$op(right);
-      $store.stack.push(res)
+  ($name: ident, $type: ty, $op: ident) => {
+    pub fn $name(store: &mut Store) -> Trap<()> {
+      store.stack.binop(|left, right| {
+        let res = (left.0 as $type).$op(right.0 as $type);
+        *left = StackValue(res as _);
+        Ok(())
+      })
     }
   };
-  ($store: expr, $type: ty, $op: ident, $as_type: ty) => {
-    {
-      let (left, right) = $store.stack.pop_pair()? as ($type, $type);
-      let res = left.$op(right);
-      $store.stack.push(res as $as_type)
+  ($name: ident, $type: ty, $op: ident, $as_type: ty) => {
+    pub fn $name(store: &mut Store) -> Trap<()> {
+      store.stack.binop(|left, right| {
+        let res = (left.0 as $type).$op(right.0 as $type) as $as_type;
+        *left = StackValue(res as _);
+        Ok(())
+      })
     }
   };
-  ($store: expr, $type: ty, $type2: ty, $op: ident, $as_type: ty) => {
-    {
-      let left: $type = $store.stack.pop()?;
-      let right: $type2 = $store.stack.pop()?;
-      let res = left.$op(right);
-      $store.stack.push(res as $as_type)
+  ($name: ident, $type: ty, $type2: ty, $op: ident, $as_type: ty) => {
+    pub fn $name(store: &mut Store) -> Trap<()> {
+      store.stack.binop(|left, right| {
+        let res = (left.0 as $type).$op(right.0 as $type2) as $as_type;
+        *left = StackValue(res as _);
+        Ok(())
+      })
     }
   };
-  ($store: expr, $type: ty, $op: ident, $as_type: ty, $mask: expr) => {
-    {
-      let (left, right) = $store.stack.pop_pair()? as ($type, $type);
-      let res = left.$op((right & $mask) as u32);
-      $store.stack.push(res as $as_type)
+  ($name: ident, $type: ty, $op: ident, $as_type: ty, $mask: expr) => {
+    pub fn $name(store: &mut Store) -> Trap<()> {
+      store.stack.binop(|left, right| {
+        let right = (right.0 as $type) & $mask;
+        let res = (left.0 as $type).$op(right as u32) as $as_type;
+        *left = StackValue(res as _);
+        Ok(())
+      })
     }
   };
 }
 
 macro_rules! impl_int_binops_div {
-  ($store: expr, $type: ty, $op: ident, $as_type: ty) => {
-    {
-      let (left, right) = $store.stack.pop_pair()? as ($type, $type);
-      let res = left.$op(right)
-        .ok_or_else(|| {
-          if right == 0 {
-            TrapKind::DivisionByZero
-          } else {
-            TrapKind::InvalidConversionToInt
-          }
-        })?;
-      $store.stack.push(res as $as_type)
+  ($name: ident, $type: ty, $op: ident, $as_type: ty) => {
+    pub fn $name(store: &mut Store) -> Trap<()> {
+      store.stack.binop(|left, right| {
+        let res = (left.0 as $type).$op(right.0 as $type)
+          .ok_or_else(|| {
+            if (right.0 as $type) == 0 {
+              TrapKind::DivisionByZero
+            } else {
+              TrapKind::InvalidConversionToInt
+            }
+          })?;
+        *left = StackValue((res as $as_type) as _);
+        Ok(())
+      })
     }
   };
 }
 
 macro_rules! impl_int_relops {
-  ($store: expr, $type: ty, $relop: expr) => {
-    {
-      let val: $type = $store.stack.pop()?;
-      let res = $relop(val);
-      $store.stack.push(res as u64)
+  ($name: ident, $type: ty, $relop: expr) => {
+    pub fn $name(store: &mut Store) -> Trap<()> {
+      store.stack.unop(|val| {
+        let res = $relop(val.0 as $type);
+        *val = StackValue(res as u64);
+        Ok(())
+      })
     }
   };
-  ($store: expr, $type: ty, $type2: ty, $relop: expr) => {
-    {
-      let right: $type2 = $store.stack.pop()?;
-      let left: $type = $store.stack.pop()?;
-      let res = $relop(left, right);
-      $store.stack.push(res as u64)
+  ($name: ident, $type: ty, $type2: ty, $relop: expr) => {
+    pub fn $name(store: &mut Store) -> Trap<()> {
+      store.stack.binop(|left, right| {
+        let res = $relop(left.0 as $type, right.0 as $type2);
+        *left = StackValue(res as u64);
+        Ok(())
+      })
     }
   };
 }
@@ -483,109 +481,58 @@ macro_rules! impl_numeric_ops {
         store.stack.push(val.count_ones())
       }
 
-      pub fn add(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, wrapping_add)
-      }
+      impl_int_binops!(add, $type, wrapping_add);
+      impl_int_binops!(sub, $type, wrapping_sub);
 
-      pub fn sub(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, wrapping_sub)
-      }
+      impl_int_binops!(mul, $type, wrapping_mul);
 
-      pub fn mul(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, wrapping_mul)
-      }
-      pub fn div_s(store: &mut Store) -> Trap<()> {
-        impl_int_binops_div!(store, $type, checked_div, i64)
-      }
-      pub fn div_u(store: &mut Store) -> Trap<()> {
-        impl_int_binops_div!(store, $type, checked_div, u64)
-      }
-      pub fn rem_s(store: &mut Store) -> Trap<()> {
-        impl_int_binops_div!(store, $type, checked_rem, i64)
-      }
-      pub fn rem_u(store: &mut Store) -> Trap<()> {
-        impl_int_binops_div!(store, $type, checked_rem, u64)
-      }
-      pub fn and(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, bitand)
-      }
-      pub fn or(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, bitor)
-      }
-      pub fn xor(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, bitxor)
-      }
-      pub fn shl(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, wrapping_shl, $type_u, 0x1F)
-      }
-      pub fn shr_s(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, wrapping_shr, $type_u, 0x1F)
-      }
-      pub fn shr_u(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, wrapping_shr, $type_u, 0x1F)
-      }
-      pub fn rotl(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, u32, rotate_left, u64)
-      }
-      pub fn rotr(store: &mut Store) -> Trap<()> {
-        impl_int_binops!(store, $type, u32, rotate_right, u64)
-      }
+      impl_int_binops_div!(div_s, $type, checked_div, i64);
+      impl_int_binops_div!(div_u, $type, checked_div, u64);
+      impl_int_binops_div!(rem_s, $type, checked_rem, i64);
+      impl_int_binops_div!(rem_u, $type, checked_rem, u64);
 
-      pub fn eqz(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type, |val| {
-          val == Default::default()
-        })
-      }
-      pub fn eq(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type, $type, |left, right| {
-          left == right
-        })
-      }
-      pub fn ne(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type, $type, |left, right| {
-          left != right
-        })
-      }
-      pub fn lt_s(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type, $type, |left, right| {
-          left < right
-        })
-      }
-      pub fn lt_u(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type_u, $type_u, |left, right| {
-          left < right
-        })
-      }
-      pub fn gt_s(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type, $type, |left, right| {
-          left > right
-        })
-      }
-      pub fn gt_u(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type_u, $type_u, |left, right| {
-          left > right
-        })
-      }
-      pub fn le_s(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type, $type, |left, right| {
-          left <= right
-        })
-      }
-      pub fn le_u(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type_u, $type_u, |left, right| {
-          left <= right
-        })
-      }
-      pub fn ge_s(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type, $type, |left, right| {
-          left >= right
-        })
-      }
-      pub fn ge_u(store: &mut Store) -> Trap<()> {
-        impl_int_relops!(store, $type_u, $type_u, |left, right| {
-          left >= right
-        })
-      }
+      impl_int_binops!(and, $type, bitand);
+      impl_int_binops!(or, $type, bitor);
+      impl_int_binops!(xor, $type, bitxor);
+      impl_int_binops!(shl, $type, wrapping_shl, $type_u, 0x1F);
+      impl_int_binops!(shr_s, $type, wrapping_shr, $type_u, 0x1F);
+      impl_int_binops!(shr_u, $type, wrapping_shr, $type_u, 0x1F);
+      impl_int_binops!(rotl, $type, u32, rotate_left, u64);
+      impl_int_binops!(rotr, $type, u32, rotate_right, u64);
+
+      impl_int_relops!(eqz, $type, |val| {
+        val == Default::default()
+      });
+      impl_int_relops!(eq, $type, $type, |left, right| {
+        left == right
+      });
+      impl_int_relops!(ne, $type, $type, |left, right| {
+        left != right
+      });
+      impl_int_relops!(lt_s, $type, $type, |left, right| {
+        left < right
+      });
+      impl_int_relops!(lt_u, $type_u, $type_u, |left, right| {
+        left < right
+      });
+      impl_int_relops!(gt_s, $type, $type, |left, right| {
+        left > right
+      });
+      impl_int_relops!(gt_u, $type_u, $type_u, |left, right| {
+        left > right
+      });
+      impl_int_relops!(le_s, $type, $type, |left, right| {
+        left <= right
+      });
+      impl_int_relops!(le_u, $type_u, $type_u, |left, right| {
+        left <= right
+      });
+      impl_int_relops!(ge_s, $type, $type, |left, right| {
+        left >= right
+      });
+      impl_int_relops!(ge_u, $type_u, $type_u, |left, right| {
+        left >= right
+      });
 
       pub fn trunc_s_f32(_store: &mut Store) -> Trap<()> {
         todo!();

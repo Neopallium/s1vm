@@ -17,19 +17,19 @@ fn main() -> Result<(), Error> {
     }
   }).collect();
 
-  println!("Type sizes:");
-  println!("isa::Instruction = {}", std::mem::size_of::<Instruction>());
-  println!("bwasm::Instruction = {}", std::mem::size_of::<bwasm::Instruction>());
+  //println!("Type sizes:");
+  //println!("isa::Instruction = {}", std::mem::size_of::<Instruction>());
+  //println!("bwasm::Instruction = {}", std::mem::size_of::<bwasm::Instruction>());
 
   // Create VM.
   let mut vm = VM::new();
 
   // Load wasm file
-  println!("--- Loading module: {}", file);
+  //println!("--- Loading module: {}", file);
   vm.load_file("main", &file)?;
 
   // Call module function
-  println!("Calling:  {}({:?})", func, params);
+  //println!("Calling:  {}({:?})", func, params);
   let ret = vm.call("main", &func, &params)?;
   if let Some(ret) = ret {
     println!("ret = {}", ret);

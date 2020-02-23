@@ -50,7 +50,7 @@ impl State {
     for export in module.exports().into_iter() {
       match export.internal() {
         bwasm::Internal::Function(idx) => {
-          println!("-Export function '{}' at {}", export.field(), *idx);
+          //eprintln!("-Export function '{}' at {}", export.field(), *idx);
           mod_inst.add_export(export.field(), *idx)?;
         },
         _ => {
@@ -82,15 +82,21 @@ impl State {
     mod_inst.find_function(name)
   }
 
-  pub fn invoke_function(&self, store: &mut Store, func_addr: FuncAddr) -> Trap<RetValue> {
+  pub fn invoke_function(&self, store: &mut Store, func_addr: FuncAddr) -> Trap<()> {
     let func = self.get_function(func_addr)?;
-    Ok(func.call(self, store)?)
+    func.call(self, store)
   }
 
   pub fn call(&self, store: &mut Store, func_addr: FuncAddr, params: &[Value]) -> Result<RetValue> {
     store.stack.push_params(params)?;
-    let ret = self.invoke_function(store, func_addr)?;
-    Ok(ret)
+    let func = self.get_function(func_addr)?;
+    func.call(self, store)?;
+    if let Some(ret_type) = func.ret_type() {
+      let ret = store.stack.pop_typed(ret_type)?;
+      Ok(Some(ret))
+    } else {
+      Ok(None)
+    }
   }
 }
 
