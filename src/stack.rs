@@ -205,6 +205,7 @@ impl Stack {
       .ok_or(TrapKind::StackOverflow)
   }
 
+  /// Apply a 'unop' to top value, replacing it with the results.
   #[inline]
   pub fn unop<F>(&mut self, op: F) -> Trap<()>
     where F: FnOnce(&mut StackValue) -> Trap<()>
@@ -214,6 +215,7 @@ impl Stack {
     op(&mut val)
   }
 
+  /// Apply a `binop` to the top two values, replacing them with the results.
   #[inline]
   pub fn binop<F>(&mut self, op: F) -> Trap<()>
     where F: FnOnce(&mut StackValue, StackValue) -> Trap<()>
