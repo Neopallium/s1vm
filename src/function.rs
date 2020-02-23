@@ -8,19 +8,25 @@ pub struct InternalFunction {
   pub code: Vec<isa::Instruction>,
 }
 
+type CompiledFunc = Box<dyn Fn(&State, &mut Store) -> Trap<Option<StackValue>>>;
+
+pub struct CompiledFunction {
+  pub local_types: Vec<ValueType>,
+  pub run: CompiledFunc,
+}
+
 #[derive(Debug, Clone)]
 pub struct HostFunction {
   pub mod_idx: usize,
   pub func_idx: usize,
 }
 
-#[derive(Debug)]
 pub enum FunctionBody {
   Internal(InternalFunction),
+  Compiled(CompiledFunction),
   Host(HostFunction),
 }
 
-#[derive(Debug)]
 pub struct Function {
   pub name: String,
   pub func_type: FunctionType,
@@ -30,7 +36,7 @@ pub struct Function {
 impl Function {
   pub fn new(func: &bwasm::Function) -> Result<Function> {
     let code = compile_function(func)?;
-    /*
+    //*
     eprintln!("----- Compiled function: {}", func.name());
     for (pc, op) in code.iter().enumerate() {
       eprintln!("- {}: {:?}", pc, op);
@@ -46,6 +52,17 @@ impl Function {
     })
   }
 
+  pub fn new_compiled(func: &bwasm::Function, run: CompiledFunc) -> Function {
+    Function {
+      name: func.name().to_string(),
+      func_type: FunctionType::from(func.func_type()),
+      body: FunctionBody::Compiled(CompiledFunction{
+        local_types: ValueType::from_slice(func.locals()),
+        run,
+      }),
+    }
+  }
+
   pub fn param_count(&self) -> usize {
     self.func_type.param_count()
   }
@@ -54,17 +71,28 @@ impl Function {
     self.func_type.ret_type
   }
 
-  pub fn call(&self, state: &State, store: &mut Store) -> Trap<()> {
+  pub fn call(&self, state: &State, store: &mut Store) -> Trap<Option<StackValue>> {
     match self.body {
       FunctionBody::Internal(ref body) => {
         // Setup stack frame for function.
         let old_frame = store.stack.push_frame(self.param_count(), body.local_types.len())?;
 
         // run function
-        let ret = run_function(body, state, store)?;
+        let ret = run_function(self, body, state, store)?;
 
         // cleanup stack frame.
-        store.stack.pop_frame(old_frame, self.ret_type());
+        store.stack.pop_frame(old_frame);
+        Ok(ret)
+      },
+      FunctionBody::Compiled(ref body) => {
+        // Setup stack frame for function.
+        let old_frame = store.stack.push_frame(self.param_count(), body.local_types.len())?;
+
+        // run function
+        let ret = (body.run)(state, store)?;
+
+        // cleanup stack frame.
+        store.stack.pop_frame(old_frame);
         Ok(ret)
       },
       FunctionBody::Host(_) => {
@@ -74,7 +102,7 @@ impl Function {
   }
 }
 
-fn run_function(body: &InternalFunction, state: &State, store: &mut Store) -> Trap<()> {
+fn run_function(func: &Function, body: &InternalFunction, state: &State, store: &mut Store) -> Trap<Option<StackValue>> {
   //eprintln!("run_function: {}", func.name);
   //eprintln!("-- Stack: {:?}", store.stack);
   let mut pc = 0usize;
@@ -117,11 +145,17 @@ fn run_function(body: &InternalFunction, state: &State, store: &mut Store) -> Tr
         return Err(TrapKind::Unreachable);
       },
       Return => {
-        return Ok(());
+        if func.ret_type().is_some() {
+          return Ok(Some(store.stack.pop_val()?));
+        } else {
+          return Ok(None);
+        }
       },
 
       Call(func_idx) => {
-        state.invoke_function(store, func_idx)?;
+        if let Some(ret) = state.invoke_function(store, func_idx)? {
+          store.stack.push_val(ret)?;
+        }
       },
       CallIndirect(_type_idx) => {
         todo!("call");
@@ -343,7 +377,7 @@ fn run_function(body: &InternalFunction, state: &State, store: &mut Store) -> Tr
     }
     pc = pc + 1;
   }
-  Ok(())
+  Ok(None)
 }
 
 macro_rules! impl_int_binops {

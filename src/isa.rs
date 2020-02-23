@@ -357,7 +357,7 @@ pub fn compile_function(func: &bwasm::Function) -> Result<Vec<Instruction>> {
   // compile function opcodes.
   for op in code.into_iter() {
     use parity_wasm::elements::Instruction::*;
-    //eprintln!("compile op: {:?}", op);
+    eprintln!("compile op: {:?}", op);
     let res = match op {
 	    Block(_) => {
         let block = self::Block::Block {

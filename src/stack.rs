@@ -99,14 +99,9 @@ impl Stack {
   }
 
   /// Remove current stack frame and restore previous frame.
-  pub fn pop_frame(&mut self, old_frame: Frame, ret_type: Option<ValueType>) {
-    let mut new_len = self.frame.bp;
-    if ret_type.is_some() {
-      self.stack.swap_remove(new_len);
-      new_len += 1;
-    }
+  pub fn pop_frame(&mut self, old_frame: Frame) {
     // Drop current stack frame values.
-    self.stack.truncate(new_len);
+    self.stack.truncate(self.frame.bp);
     // Restore old frame
     self.frame = old_frame;
   }

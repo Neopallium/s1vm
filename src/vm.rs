@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::*;
+use crate::compiler::Compiler;
 use crate::error::*;
 
 /// VM Store - Mutable data
@@ -40,11 +41,11 @@ impl State {
     let mod_addr = self.module_instances.len() as ModuleInstanceAddr;
     // create new module instance.
     let mut mod_inst = ModuleInstance::new();
-    // load functions
-    for func in module.functions().into_iter() {
-      let addr = self.funcs.len() as FuncAddr;
-      self.funcs.push(Function::new(&func)?);
-      mod_inst.add_function(addr);
+    // compile functions
+    let compiler = Compiler::new(module);
+    self.funcs = compiler.compile()?;
+    for addr in 0..self.funcs.len() {
+      mod_inst.add_function(addr as u32);
     }
     // load exports
     for export in module.exports().into_iter() {
@@ -82,7 +83,7 @@ impl State {
     mod_inst.find_function(name)
   }
 
-  pub fn invoke_function(&self, store: &mut Store, func_addr: FuncAddr) -> Trap<()> {
+  pub fn invoke_function(&self, store: &mut Store, func_addr: FuncAddr) -> Trap<Option<StackValue>> {
     let func = self.get_function(func_addr)?;
     func.call(self, store)
   }
@@ -90,10 +91,18 @@ impl State {
   pub fn call(&self, store: &mut Store, func_addr: FuncAddr, params: &[Value]) -> Result<RetValue> {
     store.stack.push_params(params)?;
     let func = self.get_function(func_addr)?;
-    func.call(self, store)?;
-    if let Some(ret_type) = func.ret_type() {
-      let ret = store.stack.pop_typed(ret_type)?;
-      Ok(Some(ret))
+    let ret = func.call(self, store)?;
+    if let Some(ret) = ret {
+      if let Some(ret_type) = func.ret_type() {
+        Ok(Some(match ret_type {
+          ValueType::I32 => Value::I32(ret.0 as _),
+          ValueType::I64 => Value::I64(ret.0 as _),
+          ValueType::F32 => Value::F32(f32::from_bits(ret.0 as _)),
+          ValueType::F64 => Value::F64(f64::from_bits(ret.0 as _)),
+        }))
+      } else {
+        Err(Error::RuntimeError(TrapKind::UnexpectedSignature))
+      }
     } else {
       Ok(None)
     }

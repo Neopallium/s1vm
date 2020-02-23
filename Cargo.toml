@@ -10,8 +10,8 @@ wasmi-validation = "0.3.0"
 parity-wasm = "0.41.0"
 
 # uncomment these to do profiling.
-#[profile.dev]
-#opt-level = 1
-#
-#[profile.release]
-#debug = true
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+debug = true

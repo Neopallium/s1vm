@@ -12,6 +12,7 @@ mod value;
 pub use value::*;
 mod isa;
 pub use isa::*;
+mod compiler;
 mod vm;
 pub use vm::*;
 
