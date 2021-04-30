@@ -22,12 +22,12 @@ Benchmark of `s1vm` against other wasm interpreters:
 - fib.wasm 35
   - wasm3 - 0.66 seconds
   - s1vm  - 1.29 seconds
-	- wasmi - 3.31 seconds
+  - wasmi - 3.31 seconds
 
 - fib.wasm 41
   - wasm3 -  9.8 seconds
   - s1vm  - 22.5 seconds
-	- wasmi - 57.6 seconds
+  - wasmi - 57.6 seconds
 
 ## TODOs
 
