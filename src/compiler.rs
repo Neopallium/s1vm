@@ -167,17 +167,10 @@ impl Compiler {
     self.ret_type = func.return_type().map(ValueType::from);
     self.pc_end = self.code.len();
 
-    /*
-    eprintln!("----- Compiling function: {}", func.name());
-    for (pc, op) in self.code.iter().enumerate() {
-      eprintln!("- {}: {:?}", pc, op);
-    }
-    // */
-
     let mut state = State::new();
     let block = self.compile_block(&mut state, BlockKind::Block)?;
 
-    self.compiled.push(Function::new_compiled(func,
+    self.compiled.push(Function::new(func,
     Box::new(move |state: &vm::State, store: &mut Store| -> Trap<Option<StackValue>>
     {
       match block.run(state, store)? {
