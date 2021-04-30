@@ -3,6 +3,11 @@ name = "s1vm"
 version = "0.1.0"
 authors = ["Robert G. Jakabosky <rjakabosky+neopallium@neoawareness.com>"]
 edition = "2018"
+license = "MIT/Apache-2.0"
+description = "Fast WebAssembly interpreter"
+keywords = ["wasm", "webassembly", "interpreter"]
+repository = "https://github.com/Neopallium/s1vm"
+homepage = "https://github.com/Neopallium/s1vm"
 
 [dependencies]
 bwasm = "0.1.1"
