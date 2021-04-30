@@ -32,5 +32,4 @@ Benchmark of `s1vm` against other wasm interpreters:
 ## TODOs
 
 - [ ] - Support calling host functions.
-- [ ] src/function.rs - Implement missing opcodes.
 - [ ] src/compiler.rs - Implement missing compiler opcodes.
