@@ -32,7 +32,7 @@ fn main() -> Result<(), Error> {
   //println!("Calling:  {}({:?})", func, params);
   let ret = vm.call("main", &func, &params)?;
   if let Some(ret) = ret {
-    println!("ret = {}", ret);
+    println!("{}", ret);
   } else {
     println!("ret = <no return value>");
   }
