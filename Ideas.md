@@ -27,11 +27,11 @@ Convert (2 push, 2 pop, 1 push):
 ```rust
 /// opcode functions for i64 opcodes.
 mod i64_ops {
-	fn op_add_local_const(ctx: &Frame, local: u32, const_val: i64) -> Trap<()> {
-		let left = ctx.get_local(local);
+	fn op_add_local_const(store: &mut Store, local: u32, const_val: i64) -> Trap<()> {
+		let left = store.get_local(local);
 		let right = const_val;
 		let res = left.wrapping_add(right);
-		ctx.push(res)
+		store.push(res);
 		Ok(())
 	}
 	/// many more "merged" opcode functions.....
@@ -42,8 +42,8 @@ The compiler would make a closure:
 ```rust
 let local_idx = 0; // decoded from 'GetLocal(0)' op
 let const_val = 1234; // decoded from 'I64Const(1234)' op
-let merged_op = move |ctx: &Frame| -> Trap<()> {
-	i64_ops::op_add_local_const(ctx, local_idx, const_val)
+let merged_op = move |_state: &State, store: &mut Store| -> Trap<()> {
+	i64_ops::op_add_local_const(store, local_idx, const_val);
 };
 ```
 
