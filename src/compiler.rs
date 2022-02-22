@@ -18,28 +18,34 @@ pub enum Action {
   Branch(u32),
 }
 
-type EvalFunc = Box<dyn Fn(&vm::State, &mut Store) -> Trap<Action>>;
+type EvalFunc = Box<dyn Fn(&vm::State, &mut Store, &mut StackValue) -> Trap<Action>>;
 
-type OpFunc = Box<dyn Fn(&vm::State, &mut Store) -> Trap<StackValue>>;
+type OpFunc = Box<dyn Fn(&vm::State, &mut Store, &mut StackValue) -> Trap<StackValue>>;
 
 enum Input {
   Local(u32),
   Const(StackValue),
   Op(OpFunc),
+  // TODO: Need to handle opcodes that don't produce a value (SetLocal, SetGlobal).
+  //RunOp(OpFunc),
 }
 
 impl Input {
-  pub fn resolv(&self, state: &vm::State, store: &mut Store) -> Trap<StackValue> {
+  pub fn resolv(&self, state: &vm::State, store: &mut Store, _l0: &mut StackValue) -> Trap<StackValue> {
     match self {
+      Input::Local(0) => {
+        //eprintln!("-- run compiled: GetLocal({})", local_idx);
+        Ok(*_l0)
+      },
       Input::Local(local_idx) => {
         //eprintln!("-- run compiled: GetLocal({})", local_idx);
-        Ok(store.stack.get_local_val(*local_idx))
+        Ok(store.stack.get_local_val(*local_idx, _l0))
       },
       Input::Const(const_val) => {
         //eprintln!("-- run compiled: Const({:?})", const_val);
         Ok(*const_val)
       },
-      Input::Op(closure) => closure(state, store),
+      Input::Op(closure) => closure(state, store, _l0),
     }
   }
 }
@@ -52,8 +58,8 @@ struct Block
 }
 
 impl Block {
-  pub fn new(kind: BlockKind, depth: u32) -> Block {
-    Block {
+  pub fn new(kind: BlockKind, depth: u32) -> Self {
+    Self {
       kind,
       depth,
       eval: vec![],
@@ -68,10 +74,10 @@ impl Block {
     self.eval.push(f);
   }
 
-  pub fn run(&self, state: &vm::State, store: &mut Store) -> Trap<Action> {
+  pub fn run(&self, state: &vm::State, store: &mut Store, _l0: &mut StackValue) -> Trap<Action> {
     //eprintln!("---- run block: {:?}", self.kind);
     for f in self.eval.iter() {
-      let ret = f(state, store)?;
+      let ret = f(state, store, _l0)?;
       //eprintln!("---- evaled: ret = {:?}", ret);
       match ret {
         Action::Return(_) => {
@@ -106,8 +112,8 @@ pub struct State {
 }
 
 impl State {
-  pub fn new() -> State {
-    State {
+  pub fn new() -> Self {
+    Self {
       values: vec![],
       depth: 0,
       pc: 0,
@@ -137,8 +143,8 @@ pub struct Compiler {
 }
 
 impl Compiler {
-  pub fn new(module: &bwasm::Module) -> Compiler {
-    Compiler {
+  pub fn new(module: &bwasm::Module) -> Self {
+    Self {
       module: module.clone(),
       compiled: vec![],
 
@@ -171,9 +177,9 @@ impl Compiler {
     let block = self.compile_block(&mut state, BlockKind::Block)?;
 
     self.compiled.push(Function::new(func,
-    Box::new(move |state: &vm::State, store: &mut Store| -> Trap<Option<StackValue>>
+    Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Option<StackValue>>
     {
-      match block.run(state, store)? {
+      match block.run(state, store, _l0)? {
         Action::Return(ret_value) => {
           //eprintln!("--- Function return: {:?}", ret_value);
           return Ok(ret_value);
@@ -249,16 +255,48 @@ impl Compiler {
         Call(func_idx) => {
           let idx = *func_idx;
           let val = state.pop()?;
-          state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-        //eprintln!("--- run compiled: {} Call({})", pc, idx);
-            let val = val.resolv(state, store)?;
-            store.stack.push_val(val)?;
-            if let Some(ret) = state.invoke_function(store, idx)? {
-              Ok(ret)
-            } else {
-              Ok(StackValue(0))
-            }
-          })));
+          state.push(Input::Op(match val {
+            Input::Local(0) => {
+              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let mut val = *_l0;
+                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
+                  Ok(ret)
+                } else {
+                  Ok(StackValue(0))
+                }
+              })
+            },
+            Input::Local(local_idx) => {
+              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let mut val = store.stack.get_local_val(local_idx, _l0);
+                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
+                  Ok(ret)
+                } else {
+                  Ok(StackValue(0))
+                }
+              })
+            },
+            Input::Const(const_val) => {
+              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let mut val = const_val;
+                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
+                  Ok(ret)
+                } else {
+                  Ok(StackValue(0))
+                }
+              })
+            },
+            Input::Op(closure) => {
+              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let mut val = closure(state, store, _l0)?;
+                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
+                  Ok(ret)
+                } else {
+                  Ok(StackValue(0))
+                }
+              })
+            },
+          }));
         },
 
 	      GetLocal(local_idx) => {
@@ -295,26 +333,26 @@ impl Compiler {
       let ret = state.pop()?;
       match ret {
         Input::Local(local_idx) => {
-          block.push(Box::new(move |_state: &vm::State, store: &mut Store| -> Trap<Action> {
-            let ret = store.stack.get_local_val(local_idx);
+          block.push(Box::new(move |_state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action> {
+            let ret = store.stack.get_local_val(local_idx, _l0);
             Ok(Action::Return(Some(StackValue(ret.0 as _))))
           }));
         },
         Input::Const(const_val) => {
-          block.push(Box::new(move |_state: &vm::State, _store: &mut Store| -> Trap<Action> {
+          block.push(Box::new(move |_state: &vm::State, _store: &mut Store, _l0: &mut StackValue| -> Trap<Action> {
             let ret = const_val;
             Ok(Action::Return(Some(StackValue(ret.0 as _))))
           }));
         },
         Input::Op(closure) => {
-          block.push(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<Action> {
-            let ret = closure(state, store)?;
+          block.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action> {
+            let ret = closure(state, store, _l0)?;
             Ok(Action::Return(Some(StackValue(ret.0 as _))))
           }));
         },
       }
     } else {
-      block.push(Box::new(move |_state: &vm::State, _store: &mut Store| -> Trap<Action> {
+      block.push(Box::new(move |_state: &vm::State, _store: &mut Store, _l0: &mut StackValue| -> Trap<Action> {
         //eprintln!("--- run compiled RETURN: no value");
         Ok(Action::Return(None))
       }));
@@ -351,24 +389,24 @@ impl Compiler {
     if let Some(else_block) = else_block {
       match val {
         Input::Op(closure) => {
-          parent.push(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<Action>
+          parent.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action>
           {
-            let val = closure(state, store)?;
+            let val = closure(state, store, _l0)?;
             if val.0 == 0 {
-              else_block.run(state, store)
+              else_block.run(state, store, _l0)
             } else {
-              if_block.run(state, store)
+              if_block.run(state, store, _l0)
             }
           }));
         },
         _ => {
-          parent.push(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<Action>
+          parent.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action>
           {
-            let val = val.resolv(state, store)?;
+            let val = val.resolv(state, store, _l0)?;
             if val.0 == 0 {
-              else_block.run(state, store)
+              else_block.run(state, store, _l0)
             } else {
-              if_block.run(state, store)
+              if_block.run(state, store, _l0)
             }
           }));
         },
@@ -376,24 +414,24 @@ impl Compiler {
     } else {
       match val {
         Input::Op(closure) => {
-          parent.push(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<Action>
+          parent.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action>
           {
-            let val = closure(state, store)?;
+            let val = closure(state, store, _l0)?;
             if val.0 == 0 {
               Ok(Action::End)
             } else {
-              if_block.run(state, store)
+              if_block.run(state, store, _l0)
             }
           }));
         },
         _ => {
-          parent.push(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<Action>
+          parent.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action>
           {
-            let val = val.resolv(state, store)?;
+            let val = val.resolv(state, store, _l0)?;
             if val.0 == 0 {
               Ok(Action::End)
             } else {
-              if_block.run(state, store)
+              if_block.run(state, store, _l0)
             }
           }));
         },
@@ -413,11 +451,25 @@ macro_rules! impl_int_binops {
       let right = state.pop()?;
       let left = state.pop()?;
       match left {
+        Input::Local(0) => {
+          match right {
+            Input::Const(right_const) => {
+              state.push(Input::Op(Box::new(move |_state: &vm::State, _store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let left = *_l0;
+                let right = right_const;
+                let res = (left.0 as $type).$op(right.0 as $type);
+                Ok(StackValue(res as _))
+              })));
+              return Ok(());
+            },
+            _ => (),
+          }
+        },
         Input::Local(left_idx) => {
           match right {
             Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |_state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-                let left = store.stack.get_local_val(left_idx);
+              state.push(Input::Op(Box::new(move |_state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let left = store.stack.get_local_val(left_idx, _l0);
                 let right = right_const;
                 let res = (left.0 as $type).$op(right.0 as $type);
                 Ok(StackValue(res as _))
@@ -429,20 +481,30 @@ macro_rules! impl_int_binops {
         },
         Input::Op(left_closure) => {
           match right {
-            Input::Local(right_idx) => {
-              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
+            Input::Local(0) => {
+              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
                 //eprintln!("-------- fast binop: 1 closures");
-                let left = left_closure(state, store)?;
-                let right = store.stack.get_local_val(right_idx);
+                let left = left_closure(state, store, _l0)?;
+                let right = *_l0;
+                let res = (left.0 as $type).$op(right.0 as $type);
+                Ok(StackValue(res as _))
+              })));
+              return Ok(());
+            },
+            Input::Local(right_idx) => {
+              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                //eprintln!("-------- fast binop: 1 closures");
+                let left = left_closure(state, store, _l0)?;
+                let right = store.stack.get_local_val(right_idx, _l0);
                 let res = (left.0 as $type).$op(right.0 as $type);
                 Ok(StackValue(res as _))
               })));
               return Ok(());
             },
             Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
+              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
                 //eprintln!("-------- fast binop: 1 closures");
-                let left = left_closure(state, store)?;
+                let left = left_closure(state, store, _l0)?;
                 let right = right_const;
                 let res = (left.0 as $type).$op(right.0 as $type);
                 Ok(StackValue(res as _))
@@ -450,10 +512,10 @@ macro_rules! impl_int_binops {
               return Ok(());
             },
             Input::Op(right_closure) => {
-              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
+              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
                 //eprintln!("-------- fast binop: 2 closures");
-                let left = left_closure(state, store)?;
-                let right = right_closure(state, store)?;
+                let left = left_closure(state, store, _l0)?;
+                let right = right_closure(state, store, _l0)?;
                 let res = (left.0 as $type).$op(right.0 as $type);
                 Ok(StackValue(res as _))
               })));
@@ -463,10 +525,10 @@ macro_rules! impl_int_binops {
         },
         _ => (),
       }
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
+      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
         eprintln!("-------- slow binop.");
-        let left = left.resolv(state, store)?;
-        let right = right.resolv(state, store)?;
+        let left = left.resolv(state, store, _l0)?;
+        let right = right.resolv(state, store, _l0)?;
         let res = (left.0 as $type).$op(right.0 as $type);
         Ok(StackValue(res as _))
       })));
@@ -477,9 +539,9 @@ macro_rules! impl_int_binops {
     pub fn $name(state: &mut State) -> Result<()> {
       let right = state.pop()?;
       let left = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-        let left = left.resolv(state, store)?;
-        let right = right.resolv(state, store)?;
+      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+        let left = left.resolv(state, store, _l0)?;
+        let right = right.resolv(state, store, _l0)?;
         let res = (left.0 as $type).$op(right.0 as $type) as $as_type;
         Ok(StackValue(res as _))
       })));
@@ -490,9 +552,9 @@ macro_rules! impl_int_binops {
     pub fn $name(state: &mut State) -> Result<()> {
       let right = state.pop()?;
       let left = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-        let left = left.resolv(state, store)?;
-        let right = right.resolv(state, store)?;
+      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+        let left = left.resolv(state, store, _l0)?;
+        let right = right.resolv(state, store, _l0)?;
         let res = (left.0 as $type).$op(right.0 as $type2) as $as_type;
         Ok(StackValue(res as _))
       })));
@@ -503,9 +565,9 @@ macro_rules! impl_int_binops {
     pub fn $name(state: &mut State) -> Result<()> {
       let right = state.pop()?;
       let left = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-        let left = left.resolv(state, store)?;
-        let right = right.resolv(state, store)?;
+      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+        let left = left.resolv(state, store, _l0)?;
+        let right = right.resolv(state, store, _l0)?;
         let right = (right.0 as $type) & $mask;
         let res = (left.0 as $type).$op(right as u32) as $as_type;
         Ok(StackValue(res as _))
@@ -517,7 +579,7 @@ macro_rules! impl_int_binops {
 
 macro_rules! impl_int_binops_div {
   ($name: ident, $type: ty, $op: ident, $as_type: ty) => {
-    pub fn $name(store: &mut Store) -> Trap<()> {
+    pub fn $name(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
       store.stack.binop(|left, right| {
         let res = (left.0 as $type).$op(right.0 as $type)
           .ok_or_else(|| {
@@ -538,8 +600,8 @@ macro_rules! impl_int_relops {
   ($name: ident, $type: ty, $relop: expr) => {
     pub fn $name(state: &mut State) -> Result<()> {
       let val = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-        let val = val.resolv(state, store)?;
+      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+        let val = val.resolv(state, store, _l0)?;
         let res = $relop(val.0 as $type);
         Ok(StackValue(res as _))
       })));
@@ -551,11 +613,25 @@ macro_rules! impl_int_relops {
       let right = state.pop()?;
       let left = state.pop()?;
       match left {
+        Input::Local(0) => {
+          match right {
+            Input::Const(right_const) => {
+              state.push(Input::Op(Box::new(move |_state: &vm::State, _store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let left = *_l0;
+                let right = right_const;
+                let res = $relop(left.0 as $type, right.0 as $type2);
+                Ok(StackValue(res as _))
+              })));
+              return Ok(());
+            },
+            _ => (),
+          }
+        },
         Input::Local(left_idx) => {
           match right {
             Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |_state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-                let left = store.stack.get_local_val(left_idx);
+              state.push(Input::Op(Box::new(move |_state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+                let left = store.stack.get_local_val(left_idx, _l0);
                 let right = right_const;
                 let res = $relop(left.0 as $type, right.0 as $type2);
                 Ok(StackValue(res as _))
@@ -567,9 +643,9 @@ macro_rules! impl_int_relops {
         },
         _ => (),
       }
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store| -> Trap<StackValue> {
-        let left = left.resolv(state, store)?;
-        let right = right.resolv(state, store)?;
+      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
+        let left = left.resolv(state, store, _l0)?;
+        let right = right.resolv(state, store, _l0)?;
         let res = $relop(left.0 as $type, right.0 as $type2);
         Ok(StackValue(res as _))
       })));
@@ -585,50 +661,50 @@ macro_rules! impl_numeric_ops {
       use std::ops::*;
       use super::*;
 
-      pub fn load(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
-      pub fn load8_s(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load8_s(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
-      pub fn load8_u(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load8_u(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
-      pub fn load16_s(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load16_s(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
-      pub fn load16_u(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load16_u(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
-      pub fn load32_s(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load32_s(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
-      pub fn load32_u(_store: &mut Store, _offset: u32) -> Trap<()> {
-        todo!();
-      }
-
-      pub fn store(_store: &mut Store, _offset: u32) -> Trap<()> {
-        todo!();
-      }
-      pub fn store8(_store: &mut Store, _offset: u32) -> Trap<()> {
-        todo!();
-      }
-      pub fn store16(_store: &mut Store, _offset: u32) -> Trap<()> {
-        todo!();
-      }
-      pub fn store32(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load32_u(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
 
-      pub fn clz(store: &mut Store) -> Trap<()> {
+      pub fn store(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
+        todo!();
+      }
+      pub fn store8(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
+        todo!();
+      }
+      pub fn store16(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
+        todo!();
+      }
+      pub fn store32(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
+        todo!();
+      }
+
+      pub fn clz(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         let val: $type = store.stack.pop()?;
         store.stack.push(val.leading_zeros())
       }
-      pub fn ctz(store: &mut Store) -> Trap<()> {
+      pub fn ctz(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         let val: $type = store.stack.pop()?;
         store.stack.push(val.trailing_zeros())
       }
-      pub fn popcnt(store: &mut Store) -> Trap<()> {
+      pub fn popcnt(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         let val: $type = store.stack.pop()?;
         store.stack.push(val.count_ones())
       }
@@ -686,16 +762,16 @@ macro_rules! impl_numeric_ops {
         left >= right
       });
 
-      pub fn trunc_s_f32(_store: &mut Store) -> Trap<()> {
+      pub fn trunc_s_f32(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn trunc_u_f32(_store: &mut Store) -> Trap<()> {
+      pub fn trunc_u_f32(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn trunc_s_f64(_store: &mut Store) -> Trap<()> {
+      pub fn trunc_s_f64(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn trunc_u_f64(_store: &mut Store) -> Trap<()> {
+      pub fn trunc_u_f64(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
 
@@ -713,97 +789,97 @@ macro_rules! impl_float_numeric_ops {
 
       use super::*;
 
-      pub fn load(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn load(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
 
-      pub fn store(_store: &mut Store, _offset: u32) -> Trap<()> {
+      pub fn store(_store: &mut Store, _l0: &mut StackValue, _offset: u32) -> Trap<()> {
         todo!();
       }
 
-      pub fn abs(_store: &mut Store) -> Trap<()> {
+      pub fn abs(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn neg(_store: &mut Store) -> Trap<()> {
+      pub fn neg(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn ceil(_store: &mut Store) -> Trap<()> {
+      pub fn ceil(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn floor(_store: &mut Store) -> Trap<()> {
+      pub fn floor(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn trunc(_store: &mut Store) -> Trap<()> {
+      pub fn trunc(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn nearest(_store: &mut Store) -> Trap<()> {
+      pub fn nearest(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn sqrt(_store: &mut Store) -> Trap<()> {
+      pub fn sqrt(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
 
-      pub fn add(store: &mut Store) -> Trap<()> {
+      pub fn add(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         let (left, right) = store.stack.pop_pair()? as ($type, $type);
         let res = left + right;
         store.stack.push(res)?;
         Ok(())
       }
 
-      pub fn sub(store: &mut Store) -> Trap<()> {
+      pub fn sub(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         let (left, right) = store.stack.pop_pair()? as ($type, $type);
         let res = left - right;
         store.stack.push(res)?;
         Ok(())
       }
 
-      pub fn mul(store: &mut Store) -> Trap<()> {
+      pub fn mul(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         let (left, right) = store.stack.pop_pair()? as ($type, $type);
         let res = left * right;
         store.stack.push(res)?;
         Ok(())
       }
-      pub fn div(_store: &mut Store) -> Trap<()> {
+      pub fn div(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn min(_store: &mut Store) -> Trap<()> {
+      pub fn min(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn max(_store: &mut Store) -> Trap<()> {
+      pub fn max(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn copysign(_store: &mut Store) -> Trap<()> {
+      pub fn copysign(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
 
-      pub fn eq(_store: &mut Store) -> Trap<()> {
+      pub fn eq(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn ne(_store: &mut Store) -> Trap<()> {
+      pub fn ne(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn lt(_store: &mut Store) -> Trap<()> {
+      pub fn lt(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn gt(_store: &mut Store) -> Trap<()> {
+      pub fn gt(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn le(_store: &mut Store) -> Trap<()> {
+      pub fn le(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn ge(_store: &mut Store) -> Trap<()> {
+      pub fn ge(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn convert_s_i32(_store: &mut Store) -> Trap<()> {
+      pub fn convert_s_i32(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn convert_u_i32(_store: &mut Store) -> Trap<()> {
+      pub fn convert_u_i32(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn convert_s_i64(_store: &mut Store) -> Trap<()> {
+      pub fn convert_s_i64(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
-      pub fn convert_u_i64(_store: &mut Store) -> Trap<()> {
+      pub fn convert_u_i64(_store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
         todo!();
       }
     }

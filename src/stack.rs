@@ -163,7 +163,10 @@ impl Stack {
   }
 
   #[inline]
-  pub fn get_local_val(&mut self, local: LocalIdx) -> StackValue {
+  pub fn get_local_val(&mut self, local: LocalIdx, l0: &mut StackValue) -> StackValue {
+    if local == 0 {
+      return *l0;
+    }
     let idx = self.frame.bp + local as usize;
 
     self.stack[idx]

@@ -83,15 +83,16 @@ impl State {
     mod_inst.find_function(name)
   }
 
-  pub fn invoke_function(&self, store: &mut Store, func_addr: FuncAddr) -> Trap<Option<StackValue>> {
+  pub fn invoke_function(&self, store: &mut Store, func_addr: FuncAddr, l0: &mut StackValue) -> Trap<Option<StackValue>> {
     let func = self.get_function(func_addr)?;
-    func.call(self, store)
+    func.call(self, store, l0)
   }
 
   pub fn call(&self, store: &mut Store, func_addr: FuncAddr, params: &[Value]) -> Result<RetValue> {
     store.stack.push_params(params)?;
     let func = self.get_function(func_addr)?;
-    let ret = func.call(self, store)?;
+    let mut l0 = StackValue::from(params[0]);
+    let ret = func.call(self, store, &mut l0)?;
     if let Some(ret) = ret {
       if let Some(ret_type) = func.ret_type() {
         Ok(Some(match ret_type {

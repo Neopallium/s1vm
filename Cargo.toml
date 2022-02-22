@@ -19,4 +19,6 @@ parity-wasm = "0.41"
 opt-level = 1
 
 [profile.release]
-debug = true
+#debug = true
+lto = "fat"
+codegen-units = 1
