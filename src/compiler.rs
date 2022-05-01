@@ -3,7 +3,7 @@ use crate::*;
 use crate::function::*;
 use crate::error::*;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum BlockKind {
   Block,
   Loop,
@@ -26,23 +26,18 @@ enum Input {
   Local(u32),
   Const(StackValue),
   Op(OpFunc),
-  // TODO: Need to handle opcodes that don't produce a value (SetLocal, SetGlobal).
-  //RunOp(OpFunc),
 }
 
 impl Input {
   pub fn resolv(&self, state: &vm::State, store: &mut Store, _l0: &mut StackValue) -> Trap<StackValue> {
     match self {
       Input::Local(0) => {
-        //eprintln!("-- run compiled: GetLocal({})", local_idx);
         Ok(*_l0)
       },
       Input::Local(local_idx) => {
-        //eprintln!("-- run compiled: GetLocal({})", local_idx);
         Ok(store.stack.get_local_val(*local_idx, _l0))
       },
       Input::Const(const_val) => {
-        //eprintln!("-- run compiled: Const({:?})", const_val);
         Ok(*const_val)
       },
       Input::Op(closure) => closure(state, store, _l0),
@@ -75,33 +70,41 @@ impl Block {
   }
 
   pub fn run(&self, state: &vm::State, store: &mut Store, _l0: &mut StackValue) -> Trap<Action> {
-    //eprintln!("---- run block: {:?}", self.kind);
-    for f in self.eval.iter() {
-      let ret = f(state, store, _l0)?;
-      //eprintln!("---- evaled: ret = {:?}", ret);
-      match ret {
-        Action::Return(_) => {
-          // Keep passing return value up, until we get to the function block.
-          return Ok(ret);
-        },
-        Action::End => {
-          // sub-block finished, continue this block.
-          continue;
-        },
-        Action::Branch(depth) => {
-          if self.depth > depth {
-            // keep passing action lower.
+    //eprintln!("---- run block: {:?}, len={}, depth={}", self.kind, self.eval.len(), self.depth);
+    'repeat: loop {
+      for f in self.eval.iter() {
+        let ret = f(state, store, _l0)?;
+        //eprintln!("---- evaled: ret = {:?}", ret);
+        match ret {
+          Action::Return(_) => {
+            // Keep passing return value up, until we get to the function block.
             return Ok(ret);
-          } else if self.depth == depth {
-            // handle Branch here.
-            todo!("handle branch")
-          } else {
-            unreachable!("Can't branch into a sub-block.");
+          },
+          Action::End => {
+            // sub-block finished, continue this block.
+            continue;
+          },
+          Action::Branch(depth) => {
+            //eprintln!("---- Branch({})", depth);
+            if depth > 0 {
+              // keep passing action lower.
+              return Ok(Action::Branch(depth-1));
+            } else {
+              // handle Branch here.
+              if self.kind == BlockKind::Loop {
+                // Repeat loop block.
+                continue 'repeat;
+              } else {
+                // Normal block, If, or Else.  Just exit on branch.
+                return Ok(Action::End);
+              }
+            }
           }
         }
       }
+      // End of block.
+      return Ok(Action::End);
     }
-    Ok(Action::End)
   }
 }
 
@@ -190,7 +193,7 @@ impl Compiler {
       }
     })));
 
-    //eprintln!("---------- depth = {}, values = {}", state.depth, state.len());
+    //eprintln!("---------- depth = {}, values = {}", state.depth, state.values.len());
     Ok(())
   }
 
@@ -211,19 +214,25 @@ impl Compiler {
       let op = &self.code[pc];
       //eprintln!("compile {}: {:?}", pc, op);
       match op {
-  	    Block(_) => {
+        Block(_) => {
           state.pc += 1;
-          self.compile_block(state, BlockKind::Block)?;
+          let sub_block = self.compile_block(state, BlockKind::Block)?;
+          block.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action> {
+            sub_block.run(state, store, _l0)
+          }));
         },
-  	    Loop(_) => {
+        Loop(_) => {
           state.pc += 1;
-          self.compile_loop(state)?;
+          let loop_block = self.compile_loop(state)?;
+          block.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action> {
+            loop_block.run(state, store, _l0)
+          }));
         },
-  	    If(_) => {
+        If(_) => {
           state.pc += 1;
           self.compile_if(&mut block, state)?;
         },
-  	    Else => {
+        Else => {
           match kind {
             BlockKind::If => {
               break;
@@ -233,22 +242,22 @@ impl Compiler {
             },
           }
         },
-  	    End => {
+        End => {
           if block.depth() == 0 {
             //self.emit_return(state, &mut block)?;
           }
           break;
         },
-  	    Return => {
+        Return => {
           self.emit_return(state, &mut block)?;
         },
-  	    Br(_block_depth) => {
-          todo!("");
+        Br(block_depth) => {
+          self.compile_br(&mut block, *block_depth)?;
         },
-  	    BrIf(_block_depth) => {
-          todo!("");
+        BrIf(block_depth) => {
+          self.compile_br_if(&mut block, state, *block_depth)?;
         },
-  	    BrTable(ref _br_table) => {
+        BrTable(ref _br_table) => {
           todo!("");
         },
 
@@ -299,26 +308,168 @@ impl Compiler {
           }));
         },
 
-	      GetLocal(local_idx) => {
+        GetLocal(local_idx) => {
           state.push(Input::Local(*local_idx));
         },
-	      I32Const(val) => {
+        SetLocal(set_idx) => {
+          let set_idx = *set_idx;
+          let val = state.pop()?;
+          if set_idx == 0 {
+            match val {
+              Input::Local(0) => {
+                // noop.  Get local 0 and set local 0.
+              },
+              Input::Local(local_idx) => {
+                block.push(Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<Action> {
+                  let val = store.stack.get_local_val(local_idx, l0);
+                  *l0 = val;
+                  Ok(Action::End)
+                }));
+              },
+              Input::Const(const_val) => {
+                block.push(Box::new(move |_state: &vm::State, _store: &mut Store, l0: &mut StackValue| -> Trap<Action> {
+                  *l0 = const_val;
+                  Ok(Action::End)
+                }));
+              },
+              Input::Op(closure) => {
+                block.push(Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<Action> {
+                  *l0 = closure(state, store, l0)?;
+                  Ok(Action::End)
+                }));
+              },
+            }
+          } else {
+            block.push(match val {
+              Input::Local(0) => {
+                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<Action> {
+                  let val = *l0;
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(Action::End)
+                })
+              },
+              Input::Local(local_idx) => {
+                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<Action> {
+                  let val = store.stack.get_local_val(local_idx, l0);
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(Action::End)
+                })
+              },
+              Input::Const(const_val) => {
+                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<Action> {
+                  let val = const_val;
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(Action::End)
+                })
+              },
+              Input::Op(closure) => {
+                Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<Action> {
+                  let val = closure(state, store, l0)?;
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(Action::End)
+                })
+              },
+            });
+          }
+        },
+        TeeLocal(set_idx) => {
+          let set_idx = *set_idx;
+          let val = state.pop()?;
+          if set_idx == 0 {
+            state.push(Input::Op(match val {
+              Input::Local(0) => {
+                Box::new(move |_state: &vm::State, _store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  Ok(*l0)
+                })
+              },
+              Input::Local(local_idx) => {
+                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  let val = store.stack.get_local_val(local_idx, l0);
+                  *l0 = val;
+                  Ok(val)
+                })
+              },
+              Input::Const(const_val) => {
+                Box::new(move |_state: &vm::State, _store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  let val = const_val;
+                  *l0 = val;
+                  Ok(val)
+                })
+              },
+              Input::Op(closure) => {
+                Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  let val = closure(state, store, l0)?;
+                  *l0 = val;
+                  Ok(val)
+                })
+              },
+            }));
+          } else  {
+            state.push(Input::Op(match val {
+              Input::Local(0) => {
+                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  let val = *l0;
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(val)
+                })
+              },
+              Input::Local(local_idx) => {
+                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  let val = store.stack.get_local_val(local_idx, l0);
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(val)
+                })
+              },
+              Input::Const(const_val) => {
+                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  let val = const_val;
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(val)
+                })
+              },
+              Input::Op(closure) => {
+                Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+                  let val = closure(state, store, l0)?;
+                  store.stack.set_local_val(set_idx, val, l0);
+                  Ok(val)
+                })
+              },
+            }));
+          }
+        },
+        I32Const(val) => {
           state.push(Input::Const(StackValue(*val as _)));
         },
-	      I64Const(val) => {
+        I64Const(val) => {
           state.push(Input::Const(StackValue(*val as _)));
         },
 
-	      I32Add => {
+        I32Add => {
           i32_ops::add(state)?;
         },
-	      I32Sub => {
+        I32Sub => {
           i32_ops::sub(state)?;
         },
         I32LtS => {
           i32_ops::lt_s(state)?;
         },
-        _ => todo!("implment opcode"),
+        I32Eqz => {
+          i32_ops::eqz(state)?;
+        },
+
+        I64Add => {
+          i64_ops::add(state)?;
+        },
+        I64Sub => {
+          i64_ops::sub(state)?;
+        },
+        I64LtS => {
+          i64_ops::lt_s(state)?;
+        },
+        I64Eqz => {
+          i64_ops::eqz(state)?;
+        },
+       op => todo!("implment opcode: {:?}", op),
       };
       state.pc += 1;
     }
@@ -361,7 +512,50 @@ impl Compiler {
   }
 
   fn compile_loop(&self, state: &mut State) -> Result<Block> {
-    self.compile_block(state, BlockKind::Loop)
+     self.compile_block(state, BlockKind::Loop)
+  }
+
+  fn compile_br(&self, block: &mut Block, block_depth: u32) -> Result<()> {
+    //eprintln!("emit br: {:?}", block_depth);
+     block.push(Box::new(move |_state: &vm::State, _store: &mut Store, _l0: &mut StackValue| -> Trap<Action> {
+       Ok(Action::Branch(block_depth))
+     }));
+     Ok(())
+  }
+
+  fn compile_br_if(&self, block: &mut Block, state: &mut State, block_depth: u32) -> Result<()> {
+    //eprintln!("emit br_if: {:?}", block_depth);
+    // pop condition value.
+    let val = state.pop()?;
+    match val {
+      Input::Op(closure) => {
+        block.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action>
+        {
+          let val = closure(state, store, _l0)?;
+          if val.0 != 0 {
+            //eprintln!("branch: {:?}", val);
+            Ok(Action::Branch(block_depth))
+          } else {
+            //eprintln!("continue: {:?}", val);
+            Ok(Action::End)
+          }
+        }));
+      },
+      _ => {
+        block.push(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<Action>
+        {
+          let val = val.resolv(state, store, _l0)?;
+          if val.0 != 0 {
+            //eprintln!("branch: {:?}", val);
+            Ok(Action::Branch(block_depth))
+          } else {
+            //eprintln!("continue: {:?}", val);
+            Ok(Action::End)
+          }
+        }));
+      },
+    }
+    Ok(())
   }
 
   fn compile_if(&self, parent: &mut Block, state: &mut State) -> Result<()> {
