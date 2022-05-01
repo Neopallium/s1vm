@@ -18,30 +18,54 @@ pub enum Action {
   Branch(u32),
 }
 
+type Local = u32;
+
 type EvalFunc = Box<dyn Fn(&vm::State, &mut Store, &mut StackValue) -> Trap<Action>>;
 
 type OpFunc = Box<dyn Fn(&vm::State, &mut Store, &mut StackValue) -> Trap<StackValue>>;
 
 enum Input {
-  Local(u32),
+  Local(Local),
   Const(StackValue),
   Op(OpFunc),
 }
 
 impl Input {
-  pub fn resolv(&self, state: &vm::State, store: &mut Store, _l0: &mut StackValue) -> Trap<StackValue> {
+  pub fn resolv(&self, state: &vm::State, store: &mut Store, l0: &mut StackValue) -> Trap<StackValue> {
     match self {
       Input::Local(0) => {
-        Ok(*_l0)
+        Ok(*l0)
       },
       Input::Local(local_idx) => {
-        Ok(store.stack.get_local_val(*local_idx, _l0))
+        Ok(store.stack.get_local_val(*local_idx, l0))
       },
       Input::Const(const_val) => {
         Ok(*const_val)
       },
-      Input::Op(closure) => closure(state, store, _l0),
+      Input::Op(closure) => closure(state, store, l0),
     }
+  }
+}
+
+pub trait Eval {
+  fn eval(&self, state: &vm::State, store: &mut Store, l0: &mut StackValue) -> Trap<StackValue>;
+}
+
+impl Eval for Local {
+  fn eval(&self, _state: &vm::State, store: &mut Store, l0: &mut StackValue) -> Trap<StackValue> {
+    Ok(store.stack.get_local_val(*self, l0))
+  }
+}
+
+impl Eval for StackValue {
+  fn eval(&self, _state: &vm::State, _store: &mut Store, _l0: &mut StackValue) -> Trap<StackValue> {
+    Ok(*self)
+  }
+}
+
+impl Eval for OpFunc {
+  fn eval(&self, state: &vm::State, store: &mut Store, l0: &mut StackValue) -> Trap<StackValue> {
+    self(state, store, l0)
   }
 }
 
@@ -135,6 +159,70 @@ impl State {
   }
 }
 
+macro_rules! impl_ops_match_input {
+  ($name:ident, $op:expr) => {
+    {
+      match $name {
+        Input::Local($name) => {
+          $op
+        },
+        Input::Const($name) => {
+          $op
+        },
+        Input::Op($name) => {
+          $op
+        }
+      }
+    }
+  };
+}
+
+macro_rules! impl_unops_match_input {
+  ($state:ident, $left:ident, $op:expr) => {
+    {
+      let left = $state.pop()?;
+      $state.push(Input::Op(impl_ops_match_input!(left, {
+        Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+          let $left = left.eval(state, store, l0)?.0;
+          let res = $op;
+          Ok(StackValue(res as _))
+        })
+      })));
+    }
+  };
+  ($state:ident, $vm_state:ident, $store:ident, $l0:ident, $left:ident, $op:expr) => {
+    {
+      let left = $state.pop()?;
+      $state.push(Input::Op(impl_ops_match_input!(left, {
+        Box::new(move |$vm_state: &vm::State, $store: &mut Store, $l0: &mut StackValue| -> Trap<StackValue> {
+          let $left = left.eval($vm_state, $store, $l0)?.0;
+          let res = $op;
+          Ok(StackValue(res as _))
+        })
+      })));
+    }
+  };
+}
+
+macro_rules! impl_binops_match_input {
+  ($state:ident, $left:ident, $right:ident, $op:expr) => {
+    {
+      let right = $state.pop()?;
+      let left = $state.pop()?;
+      $state.push(Input::Op(impl_ops_match_input!(left, {
+        impl_ops_match_input!(right, {
+          Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
+            let $left = left.eval(state, store, l0)?.0;
+            let $right = right.eval(state, store, l0)?.0;
+            let res = $op;
+            Ok(StackValue(res as _))
+          })
+        })
+      })));
+    }
+  };
+}
+
 pub struct Compiler {
   module: bwasm::Module,
   compiled: Vec<Function>,
@@ -202,7 +290,7 @@ impl Compiler {
     //eprintln!("compile block: depth: {} {:?}", block.depth(), kind);
     state.depth += 1;
     if state.depth > 4 {
-      panic!("compile overflow");
+      panic!("compile overflow, increase the max depth if needed");
     }
     // compile function opcodes.
     loop {
@@ -263,49 +351,14 @@ impl Compiler {
 
         Call(func_idx) => {
           let idx = *func_idx;
-          let val = state.pop()?;
-          state.push(Input::Op(match val {
-            Input::Local(0) => {
-              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let mut val = *_l0;
-                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
-                  Ok(ret)
-                } else {
-                  Ok(StackValue(0))
-                }
-              })
-            },
-            Input::Local(local_idx) => {
-              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let mut val = store.stack.get_local_val(local_idx, _l0);
-                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
-                  Ok(ret)
-                } else {
-                  Ok(StackValue(0))
-                }
-              })
-            },
-            Input::Const(const_val) => {
-              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let mut val = const_val;
-                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
-                  Ok(ret)
-                } else {
-                  Ok(StackValue(0))
-                }
-              })
-            },
-            Input::Op(closure) => {
-              Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let mut val = closure(state, store, _l0)?;
-                if let Some(ret) = state.invoke_function(store, idx, &mut val)? {
-                  Ok(ret)
-                } else {
-                  Ok(StackValue(0))
-                }
-              })
-            },
-          }));
+          impl_unops_match_input!(state, vm_state, store, l0, val, {
+            let mut val = StackValue(val);
+            if let Some(ret) = vm_state.invoke_function(store, idx, &mut val)? {
+              ret.0
+            } else {
+              0
+            }
+          });
         },
 
         GetLocal(local_idx) => {
@@ -374,68 +427,10 @@ impl Compiler {
         },
         TeeLocal(set_idx) => {
           let set_idx = *set_idx;
-          let val = state.pop()?;
-          if set_idx == 0 {
-            state.push(Input::Op(match val {
-              Input::Local(0) => {
-                Box::new(move |_state: &vm::State, _store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  Ok(*l0)
-                })
-              },
-              Input::Local(local_idx) => {
-                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  let val = store.stack.get_local_val(local_idx, l0);
-                  *l0 = val;
-                  Ok(val)
-                })
-              },
-              Input::Const(const_val) => {
-                Box::new(move |_state: &vm::State, _store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  let val = const_val;
-                  *l0 = val;
-                  Ok(val)
-                })
-              },
-              Input::Op(closure) => {
-                Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  let val = closure(state, store, l0)?;
-                  *l0 = val;
-                  Ok(val)
-                })
-              },
-            }));
-          } else  {
-            state.push(Input::Op(match val {
-              Input::Local(0) => {
-                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  let val = *l0;
-                  store.stack.set_local_val(set_idx, val, l0);
-                  Ok(val)
-                })
-              },
-              Input::Local(local_idx) => {
-                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  let val = store.stack.get_local_val(local_idx, l0);
-                  store.stack.set_local_val(set_idx, val, l0);
-                  Ok(val)
-                })
-              },
-              Input::Const(const_val) => {
-                Box::new(move |_state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  let val = const_val;
-                  store.stack.set_local_val(set_idx, val, l0);
-                  Ok(val)
-                })
-              },
-              Input::Op(closure) => {
-                Box::new(move |state: &vm::State, store: &mut Store, l0: &mut StackValue| -> Trap<StackValue> {
-                  let val = closure(state, store, l0)?;
-                  store.stack.set_local_val(set_idx, val, l0);
-                  Ok(val)
-                })
-              },
-            }));
-          }
+          impl_unops_match_input!(state, vm_state, store, l0, val, {
+            store.stack.set_local_val(set_idx, StackValue(val), l0);
+            val
+          });
         },
         I32Const(val) => {
           state.push(Input::Const(StackValue(*val as _)));
@@ -444,32 +439,16 @@ impl Compiler {
           state.push(Input::Const(StackValue(*val as _)));
         },
 
-        I32Add => {
-          i32_ops::add(state)?;
-        },
-        I32Sub => {
-          i32_ops::sub(state)?;
-        },
-        I32LtS => {
-          i32_ops::lt_s(state)?;
-        },
-        I32Eqz => {
-          i32_ops::eqz(state)?;
-        },
+        I32Add => i32_ops::add(state)?,
+        I32Sub => i32_ops::sub(state)?,
+        I32LtS => i32_ops::lt_s(state)?,
+        I32Eqz => i32_ops::eqz(state)?,
 
-        I64Add => {
-          i64_ops::add(state)?;
-        },
-        I64Sub => {
-          i64_ops::sub(state)?;
-        },
-        I64LtS => {
-          i64_ops::lt_s(state)?;
-        },
-        I64Eqz => {
-          i64_ops::eqz(state)?;
-        },
-       op => todo!("implment opcode: {:?}", op),
+        I64Add => i64_ops::add(state)?,
+        I64Sub => i64_ops::sub(state)?,
+        I64LtS => i64_ops::lt_s(state)?,
+        I64Eqz => i64_ops::eqz(state)?,
+        op => todo!("implment opcode: {:?}", op),
       };
       state.pc += 1;
     }
@@ -642,130 +621,34 @@ impl Compiler {
 macro_rules! impl_int_binops {
   ($name: ident, $type: ty, $op: ident) => {
     pub fn $name(state: &mut State) -> Result<()> {
-      let right = state.pop()?;
-      let left = state.pop()?;
-      match left {
-        Input::Local(0) => {
-          match right {
-            Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |_state: &vm::State, _store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let left = *_l0;
-                let right = right_const;
-                let res = (left.0 as $type).$op(right.0 as $type);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-            _ => (),
-          }
-        },
-        Input::Local(left_idx) => {
-          match right {
-            Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |_state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let left = store.stack.get_local_val(left_idx, _l0);
-                let right = right_const;
-                let res = (left.0 as $type).$op(right.0 as $type);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-            _ => (),
-          }
-        },
-        Input::Op(left_closure) => {
-          match right {
-            Input::Local(0) => {
-              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                //eprintln!("-------- fast binop: 1 closures");
-                let left = left_closure(state, store, _l0)?;
-                let right = *_l0;
-                let res = (left.0 as $type).$op(right.0 as $type);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-            Input::Local(right_idx) => {
-              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                //eprintln!("-------- fast binop: 1 closures");
-                let left = left_closure(state, store, _l0)?;
-                let right = store.stack.get_local_val(right_idx, _l0);
-                let res = (left.0 as $type).$op(right.0 as $type);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-            Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                //eprintln!("-------- fast binop: 1 closures");
-                let left = left_closure(state, store, _l0)?;
-                let right = right_const;
-                let res = (left.0 as $type).$op(right.0 as $type);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-            Input::Op(right_closure) => {
-              state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                //eprintln!("-------- fast binop: 2 closures");
-                let left = left_closure(state, store, _l0)?;
-                let right = right_closure(state, store, _l0)?;
-                let res = (left.0 as $type).$op(right.0 as $type);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-          }
-        },
-        _ => (),
-      }
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-        eprintln!("-------- slow binop.");
-        let left = left.resolv(state, store, _l0)?;
-        let right = right.resolv(state, store, _l0)?;
-        let res = (left.0 as $type).$op(right.0 as $type);
-        Ok(StackValue(res as _))
-      })));
+      impl_binops_match_input!(state, left, right, {
+        (left as $type).$op(right as $type)
+      });
       Ok(())
     }
   };
   ($name: ident, $type: ty, $op: ident, $as_type: ty) => {
     pub fn $name(state: &mut State) -> Result<()> {
-      let right = state.pop()?;
-      let left = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-        let left = left.resolv(state, store, _l0)?;
-        let right = right.resolv(state, store, _l0)?;
-        let res = (left.0 as $type).$op(right.0 as $type) as $as_type;
-        Ok(StackValue(res as _))
-      })));
+      impl_binops_match_input!(state, left, right, {
+        (left as $type).$op(right as $type) as $as_type
+      });
       Ok(())
     }
   };
   ($name: ident, $type: ty, $type2: ty, $op: ident, $as_type: ty) => {
     pub fn $name(state: &mut State) -> Result<()> {
-      let right = state.pop()?;
-      let left = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-        let left = left.resolv(state, store, _l0)?;
-        let right = right.resolv(state, store, _l0)?;
-        let res = (left.0 as $type).$op(right.0 as $type2) as $as_type;
-        Ok(StackValue(res as _))
-      })));
+      impl_binops_match_input!(state, left, right, {
+        (left as $type).$op(right as $type2) as $as_type
+      });
       Ok(())
     }
   };
   ($name: ident, $type: ty, $op: ident, $as_type: ty, $mask: expr) => {
     pub fn $name(state: &mut State) -> Result<()> {
-      let right = state.pop()?;
-      let left = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-        let left = left.resolv(state, store, _l0)?;
-        let right = right.resolv(state, store, _l0)?;
-        let right = (right.0 as $type) & $mask;
-        let res = (left.0 as $type).$op(right as u32) as $as_type;
-        Ok(StackValue(res as _))
-      })));
+      impl_binops_match_input!(state, left, right, {
+        let right = (right as $type) & $mask;
+        (left as $type).$op(right as u32) as $as_type
+      });
       Ok(())
     }
   };
@@ -773,19 +656,19 @@ macro_rules! impl_int_binops {
 
 macro_rules! impl_int_binops_div {
   ($name: ident, $type: ty, $op: ident, $as_type: ty) => {
-    pub fn $name(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
-      store.stack.binop(|left, right| {
-        let res = (left.0 as $type).$op(right.0 as $type)
+    pub fn $name(state: &mut State) -> Result<()> {
+      impl_binops_match_input!(state, left, right, {
+        let res = (left as $type).$op(right as $type)
           .ok_or_else(|| {
-            if (right.0 as $type) == 0 {
+            if (right as $type) == 0 {
               TrapKind::DivisionByZero
             } else {
               TrapKind::InvalidConversionToInt
             }
           })?;
-        *left = StackValue((res as $as_type) as _);
-        Ok(())
-      })
+        (res as $as_type)
+      });
+      Ok(())
     }
   };
 }
@@ -793,56 +676,17 @@ macro_rules! impl_int_binops_div {
 macro_rules! impl_int_relops {
   ($name: ident, $type: ty, $relop: expr) => {
     pub fn $name(state: &mut State) -> Result<()> {
-      let val = state.pop()?;
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-        let val = val.resolv(state, store, _l0)?;
-        let res = $relop(val.0 as $type);
-        Ok(StackValue(res as _))
-      })));
+      impl_unops_match_input!(state, left, {
+        $relop(left as $type)
+      });
       Ok(())
     }
   };
   ($name: ident, $type: ty, $type2: ty, $relop: expr) => {
     pub fn $name(state: &mut State) -> Result<()> {
-      let right = state.pop()?;
-      let left = state.pop()?;
-      match left {
-        Input::Local(0) => {
-          match right {
-            Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |_state: &vm::State, _store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let left = *_l0;
-                let right = right_const;
-                let res = $relop(left.0 as $type, right.0 as $type2);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-            _ => (),
-          }
-        },
-        Input::Local(left_idx) => {
-          match right {
-            Input::Const(right_const) => {
-              state.push(Input::Op(Box::new(move |_state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-                let left = store.stack.get_local_val(left_idx, _l0);
-                let right = right_const;
-                let res = $relop(left.0 as $type, right.0 as $type2);
-                Ok(StackValue(res as _))
-              })));
-              return Ok(());
-            },
-            _ => (),
-          }
-        },
-        _ => (),
-      }
-      state.push(Input::Op(Box::new(move |state: &vm::State, store: &mut Store, _l0: &mut StackValue| -> Trap<StackValue> {
-        let left = left.resolv(state, store, _l0)?;
-        let right = right.resolv(state, store, _l0)?;
-        let res = $relop(left.0 as $type, right.0 as $type2);
-        Ok(StackValue(res as _))
-      })));
+      impl_binops_match_input!(state, left, right, {
+        $relop(left as $type, right as $type2)
+      });
       Ok(())
     }
   };
@@ -890,18 +734,15 @@ macro_rules! impl_numeric_ops {
         todo!();
       }
 
-      pub fn clz(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
-        let val: $type = store.stack.pop()?;
-        store.stack.push(val.leading_zeros())
-      }
-      pub fn ctz(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
-        let val: $type = store.stack.pop()?;
-        store.stack.push(val.trailing_zeros())
-      }
-      pub fn popcnt(store: &mut Store, _l0: &mut StackValue) -> Trap<()> {
-        let val: $type = store.stack.pop()?;
-        store.stack.push(val.count_ones())
-      }
+      impl_int_relops!(clz, $type, |val: $type| {
+        val.leading_zeros()
+      });
+      impl_int_relops!(ctz, $type, |val: $type| {
+        val.trailing_zeros()
+      });
+      impl_int_relops!(popcnt, $type, |val: $type| {
+        val.count_ones()
+      });
 
       impl_int_binops!(add, $type, wrapping_add);
       impl_int_binops!(sub, $type, wrapping_sub);
