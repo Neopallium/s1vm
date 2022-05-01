@@ -83,19 +83,20 @@ impl Stack {
       sbp: bp + locals,
     };
 
+    if locals > 0 {
+      self.reserve_locals(locals);
+    }
+
     Ok(old_frame)
   }
 
-  pub fn reserve_locals(&mut self, locals: usize) -> Trap<()> {
-    // Reserve stack space for the locals.
-    if locals > 0 {
-      let new_len = self.len()
-        .checked_add(locals)
-        .ok_or(TrapKind::StackOverflow)?;
-      self.stack.truncate(new_len);
+  pub fn reserve_locals(&mut self, locals: usize) {
+    // Push initial value for locals.
+    // TODO: Try improving initialization of locals.
+    for _idx in 0..locals {
+      //eprintln!("Push local({})", _idx);
+      self.stack.push(StackValue(0));
     }
-
-    Ok(())
   }
 
   /// Remove current stack frame and restore previous frame.
@@ -156,7 +157,11 @@ impl Stack {
   }
 
   #[inline]
-  pub fn set_local_val(&mut self, local: LocalIdx, val: StackValue) {
+  pub fn set_local_val(&mut self, local: LocalIdx, val: StackValue, l0: &mut StackValue) {
+    if local == 0 {
+      *l0 = val;
+      return;
+    }
     let idx = self.frame.bp + local as usize;
 
     self.stack[idx] = val;
