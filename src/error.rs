@@ -23,6 +23,8 @@ pub enum Error {
   ModuleNotFound,
   ModuleExists,
 
+  CannotModifySharedVM,
+
   ParseError(parity_wasm::SerializationError),
   ValidationError(String),
 
@@ -38,6 +40,7 @@ impl fmt::Display for Error {
       Error::FuncExists => write!(f, "function already exists"),
       Error::ModuleNotFound => write!(f, "module not found"),
       Error::ModuleExists => write!(f, "module already exists"),
+      Error::CannotModifySharedVM => write!(f, "VM is shared and cannot be modified"),
       Error::ParseError(e) => write!(f, "failed to parse wasm: {}", e),
       Error::ValidationError(e) => write!(f, "failed to validate wasm: {}", e),
       Error::RuntimeError(trap) => write!(f, "runtime trap: {:?}", trap),

@@ -28,9 +28,10 @@ fn main() -> Result<(), Error> {
   //println!("--- Loading module: {}", file);
   vm.load_file("main", &file)?;
 
+  let mut instance = vm.spawn();
   // Call module function
   //println!("Calling:  {}({:?})", func, params);
-  let ret = vm.call("main", &func, &params)?;
+  let ret = instance.call("main", &func, &params)?;
   if let Some(ret) = ret {
     println!("{}", ret);
   } else {

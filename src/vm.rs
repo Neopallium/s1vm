@@ -1,14 +1,59 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::*;
 use crate::compiler::Compiler;
 use crate::error::*;
 
 /// VM Store - Mutable data
-#[derive(Default)]
 pub struct Store {
+  /// Immutable state.  Only mutable when loading modules.
+  state: Arc<State>,
+
   pub mem: Vec<u8>,
   pub stack: Stack,
+}
+
+impl Store {
+  pub fn new(state: Arc<State>) -> Self {
+    Self {
+      state: state.clone(),
+      mem: Default::default(),
+      stack: Default::default(),
+    }
+  }
+
+  pub fn get_exported(&self, module: &str, name: &str) -> Result<FuncAddr> {
+    self.state.get_exported(module, name)
+  }
+
+  pub fn invoke_function(&mut self, func_addr: FuncAddr, l0: &mut StackValue) -> Trap<Option<StackValue>> {
+    let state = self.state.clone();
+    let func = state.get_function(func_addr)?;
+    func.call(self, l0)
+  }
+
+  pub fn call(&mut self, func_addr: FuncAddr, params: &[Value]) -> Result<RetValue> {
+    let state = self.state.clone();
+    self.stack.push_params(params)?;
+    let func = state.get_function(func_addr)?;
+    let mut l0 = StackValue::from(params[0]);
+    let ret = func.call(self, &mut l0)?;
+    if let Some(ret) = ret {
+      if let Some(ret_type) = func.ret_type() {
+        Ok(Some(match ret_type {
+          ValueType::I32 => Value::I32(ret.0 as _),
+          ValueType::I64 => Value::I64(ret.0 as _),
+          ValueType::F32 => Value::F32(f32::from_bits(ret.0 as _)),
+          ValueType::F64 => Value::F64(f64::from_bits(ret.0 as _)),
+        }))
+      } else {
+        Err(Error::RuntimeError(TrapKind::UnexpectedSignature))
+      }
+    } else {
+      Ok(None)
+    }
+  }
 }
 
 /// VM State - Immutable, only changes when loading a module.
@@ -83,6 +128,7 @@ impl State {
     mod_inst.find_function(name)
   }
 
+  /*
   pub fn invoke_function(&self, store: &mut Store, func_addr: FuncAddr, l0: &mut StackValue) -> Trap<Option<StackValue>> {
     let func = self.get_function(func_addr)?;
     func.call(self, store, l0)
@@ -108,35 +154,54 @@ impl State {
       Ok(None)
     }
   }
+  */
 }
 
-#[derive(Default)]
-pub struct VM {
+pub struct VMInstance {
   // Mutable store
   store: Store,
+}
 
-  /// Immutable state.  Only mutable when loading modules.
-  state: State,
+impl VMInstance {
+  fn new(state: Arc<State>) -> Self {
+    Self {
+      store: Store::new(state),
+    }
+  }
+
+  pub fn call(&mut self, module: &str, name: &str, params: &[Value]) -> Result<RetValue> {
+    let func_addr = self.store.get_exported(module, name)?;
+    self.store.call(func_addr, params)
+  }
+}
+
+pub struct VM {
+  // Immutable state.  Only mutable when loading modules.
+  state: Arc<State>,
 }
 
 impl VM {
-  pub fn new() -> VM {
-    VM {
-      ..Default::default()
+  pub fn new() -> Self {
+    Self {
+      state: Arc::new(State::default()),
     }
   }
 
   pub fn load_file(&mut self, name: &str, file: &str) -> Result<ModuleInstanceAddr> {
-    self.state.load_file(name, file)
+    if let Some(state) = Arc::get_mut(&mut self.state) {
+      state.load_file(name, file)
+    } else {
+      // TODO: Better error message.
+      Err(Error::CannotModifySharedVM)
+    }
   }
 
   pub fn get_exported(&self, module: &str, name: &str) -> Result<FuncAddr> {
     self.state.get_exported(module, name)
   }
 
-  pub fn call(&mut self, module: &str, name: &str, params: &[Value]) -> Result<RetValue> {
-    let func_addr = self.state.get_exported(module, name)?;
-    self.state.call(&mut self.store, func_addr, params)
+  pub fn spawn(&self) -> VMInstance {
+    VMInstance::new(self.state.clone())
   }
 }
 
