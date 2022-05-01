@@ -11,7 +11,6 @@ homepage = "https://github.com/Neopallium/s1vm"
 
 [dependencies]
 bwasm = "0.1.1"
-wasmi-validation = "0.4"
 parity-wasm = "0.41"
 
 # uncomment these to do profiling.
