@@ -91,12 +91,14 @@ impl Stack {
   }
 
   pub fn reserve_locals(&mut self, locals: usize) {
+    //eprintln!("reserve_locals: len={}, locals={}", self.stack.len(), locals);
     // Push initial value for locals.
     // TODO: Try improving initialization of locals.
     for _idx in 0..locals {
       //eprintln!("Push local({})", _idx);
       self.stack.push(StackValue(0));
     }
+    //eprintln!("reserve_locals: end len={}, locals={}", self.stack.len(), locals);
   }
 
   /// Remove current stack frame and restore previous frame.
@@ -111,7 +113,7 @@ impl Stack {
     // Check for stackoverflow and get current stack size.
     let len = self.check_overflow(params.len())?;
 
-    for val in params.iter() {
+    for val in params {
       self.stack.push(StackValue::from(*val));
     }
     // return original stack size.
@@ -169,6 +171,7 @@ impl Stack {
 
   #[inline]
   pub fn get_local_val(&mut self, local: LocalIdx, l0: &mut StackValue) -> StackValue {
+    //eprintln!("get_local_val: idx={}, len={}", local, self.stack.len());
     if local == 0 {
       return *l0;
     }
@@ -179,12 +182,26 @@ impl Stack {
 
   #[inline]
   pub fn push_val(&mut self, val: StackValue) -> Trap<()> {
-    if self.len() >=  self.limit {
+    if self.len() >= self.limit {
       eprintln!("StackOverflow: limit={}, len={}", self.limit, self.len());
       return Err(TrapKind::StackOverflow);
     }
     //eprintln!("-- Push: {:?}", val);
     self.stack.push(val);
+    Ok(())
+  }
+
+  #[inline]
+  pub fn push_values(&mut self, vals: &[StackValue]) -> Trap<()> {
+    // Check for stack overflow.
+    self.len().checked_add(vals.len())
+      .filter(|l| l < &self.limit)
+      .ok_or_else(|| {
+        eprintln!("StackOverflow: limit={}, len={}", self.limit, self.len());
+        TrapKind::StackOverflow
+      })?;
+    //eprintln!("-- Push: {:?}", val);
+    self.stack.extend_from_slice(vals);
     Ok(())
   }
 

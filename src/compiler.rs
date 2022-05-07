@@ -154,8 +154,20 @@ impl State {
       })
   }
 
+  fn pop_n(&mut self, n: usize) -> Result<Vec<Input>> {
+    let at = self.values.len().checked_sub(n)
+      .ok_or_else(|| {
+        Error::ValidationError(format!("Value stack empty"))
+      })?;
+    Ok(self.values.split_off(at))
+  }
+
   fn push(&mut self, input: Input) {
     self.values.push(input);
+  }
+
+  fn len(&self) -> usize {
+    self.values.len()
   }
 }
 
@@ -259,6 +271,9 @@ impl Compiler {
     let func = self.module.get_func(func_idx)
       .ok_or(Error::FuncNotFound)?;
 
+    if func.is_imported() {
+      return Ok(());
+    }
     // Compile function into a closure
     self.code = func.instructions().to_vec();
     self.ret_type = func.return_type().map(ValueType::from);
@@ -281,13 +296,13 @@ impl Compiler {
       }
     })));
 
-    //eprintln!("---------- depth = {}, values = {}", state.depth, state.values.len());
+    //eprintln!("---------- depth = {}, values = {}", state.depth, state.len());
     Ok(())
   }
 
   fn compile_block(&self, state: &mut State, kind: BlockKind) -> Result<Block> {
     let mut block = Block::new(kind, state.depth);
-    //eprintln!("compile block: depth: {} {:?}", block.depth(), kind);
+    //eprintln!("compile block: depth: {} {:?}, stack: {}", block.depth(), kind, state.len());
     state.depth += 1;
     if state.depth > 4 {
       panic!("compile overflow, increase the max depth if needed");
@@ -331,8 +346,8 @@ impl Compiler {
           }
         },
         End => {
-          if block.depth() == 0 {
-            //self.emit_return(state, &mut block)?;
+          if block.depth() == 0 && state.len() > 0 {
+            self.emit_return(state, &mut block)?;
           }
           break;
         },
@@ -350,15 +365,38 @@ impl Compiler {
         },
 
         Call(func_idx) => {
-          let idx = *func_idx;
-          impl_unops_match_input!(state, vm_state, store, l0, val, {
-            let mut val = StackValue(val);
-            if let Some(ret) = vm_state.invoke_function(store, idx, &mut val)? {
-              ret.0
-            } else {
-              0
-            }
-          });
+          let func_idx = *func_idx;
+          let func = self.module.get_func(func_idx)
+            .ok_or(Error::FuncNotFound)?;
+          let count = func.param_count();
+          //eprintln!("Call: params={}", count);
+          if count > 1 {
+            let params = state.pop_n(count as usize - 1)?;
+            impl_unops_match_input!(state, vm_state, store, l0, val, {
+              let mut val = StackValue(val);
+              store.stack.push_val(val)?;
+              // Resolve inputs and ..
+              let params = params.iter().map(|p| {
+                p.resolv(vm_state, store, l0)
+              }).collect::<Result<Vec<_>, _>>()?;
+              // .. push the values onto the stack.
+              store.stack.push_values(&params[..])?;
+              if let Some(ret) = vm_state.invoke_function(store, func_idx, &mut val)? {
+                ret.0
+              } else {
+                0
+              }
+            });
+          } else {
+            impl_unops_match_input!(state, vm_state, store, l0, val, {
+              let mut val = StackValue(val);
+              if let Some(ret) = vm_state.invoke_function(store, func_idx, &mut val)? {
+                ret.0
+              } else {
+                0
+              }
+            });
+          }
         },
 
         GetLocal(local_idx) => {
@@ -442,11 +480,13 @@ impl Compiler {
         I32Add => i32_ops::add(state)?,
         I32Sub => i32_ops::sub(state)?,
         I32LtS => i32_ops::lt_s(state)?,
+        I32Eq => i32_ops::eq(state)?,
         I32Eqz => i32_ops::eqz(state)?,
 
         I64Add => i64_ops::add(state)?,
         I64Sub => i64_ops::sub(state)?,
         I64LtS => i64_ops::lt_s(state)?,
+        I64Eq => i64_ops::eq(state)?,
         I64Eqz => i64_ops::eqz(state)?,
         op => todo!("implment opcode: {:?}", op),
       };
@@ -454,7 +494,7 @@ impl Compiler {
     }
 
     state.depth -= 1;
-    //eprintln!("end block: depth: {} {:?}", block.depth(), kind);
+    //eprintln!("end block: depth: {} {:?}, stack: {}", block.depth(), kind, state.len());
     Ok(block)
   }
 
